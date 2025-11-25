@@ -3,7 +3,7 @@
 
 Name:              valkey
 Version:           8.0.6
-Release:           1%{?dist}
+Release:           2%{?dist}
 Summary:           A persistent key-value database
 # valkey: BSD-3-Clause
 # hiredis: BSD-3-Clause
@@ -17,6 +17,7 @@ Source1:           %{name}.logrotate
 Source2:           %{name}-sentinel.service
 Source3:           %{name}.service
 Source4:           %{name}.sysusers
+Source5:           %{name}.tmpfiles
 Source8:           macros.%{name}
 Source9:           migrate_redis_to_valkey.sh
 
@@ -163,6 +164,9 @@ rm -rf %{buildroot}%{_datadir}/%{name}
 # System user
 install -p -D -m 0644 %{S:4} %{buildroot}%{_sysusersdir}/%{name}.conf
 
+# Install tmpfiles.d file
+install -p -D -m 0644 %{S:5} %{buildroot}%{_tmpfilesdir}/%{name}.conf
+
 # Filesystem.
 install -d %{buildroot}%{_sharedstatedir}/%{name}
 install -d %{buildroot}%{_localstatedir}/log/%{name}
@@ -248,6 +252,7 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 %{_unitdir}/%{name}-sentinel.service
 %dir %attr(0755, valkey, valkey) %ghost %{_localstatedir}/run/%{name}
 %{_sysusersdir}/%{name}.conf
+%{_tmpfilesdir}/%{name}.conf
 
 
 %files devel
@@ -263,8 +268,14 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 
 
 %changelog
-* Tue Oct  7 2025 Remi Collet <remi@fedoraproject.org> - 8.0.6-1
+* Fri Oct 17 2025 Remi Collet <remi@fedoraproject.org> - 8.0.6-2
 - rebase to 8.0.6 for CVE-2025-49844 CVE-2025-46817 CVE-2025-46818 CVE-2025-46819
+
+* Mon Sep  8 2025 Remi Collet <remi@fedoraproject.org> - 8.0.4-3
+- fix ImageMode: ensure ownership of /etc/valkey
+
+* Fri Aug  1 2025 Remi Collet <remi@fedoraproject.org> - 8.0.4-2
+- fix ImageMode: add tmpfiles.d entries for directories below /var
 
 * Wed Jul 16 2025 Remi Collet <remi@fedoraproject.org> - 8.0.4-1
 - rebase to 8.0.4 for CVE-2025-27151 CVE-2025-48367 and CVE-2025-32023
