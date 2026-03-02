@@ -2,8 +2,8 @@
 %bcond_with tests
 
 Name:              valkey
-Version:           8.0.6
-Release:           2%{?dist}
+Version:           8.0.7
+Release:           1%{?dist}
 Summary:           A persistent key-value database
 # valkey: BSD-3-Clause
 # hiredis: BSD-3-Clause
@@ -268,6 +268,9 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 
 
 %changelog
+* Tue Feb 24 2026 Lukas Javorsky <ljavorsk@redhat.com> - 8.0.7-1
+- Rebase to 8.0.7 for CVE-2026-21863 CVE-2025-67733
+
 * Fri Oct 17 2025 Remi Collet <remi@fedoraproject.org> - 8.0.6-2
 - rebase to 8.0.6 for CVE-2025-49844 CVE-2025-46817 CVE-2025-46818 CVE-2025-46819
 
