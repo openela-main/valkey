@@ -2,7 +2,7 @@
 %bcond_with tests
 
 Name:              valkey
-Version:           8.0.7
+Version:           8.0.9
 Release:           1%{?dist}
 Summary:           A persistent key-value database
 # valkey: BSD-3-Clause
@@ -20,8 +20,6 @@ Source4:           %{name}.sysusers
 Source5:           %{name}.tmpfiles
 Source8:           macros.%{name}
 Source9:           migrate_redis_to_valkey.sh
-
-Patch1:            valkey-cve-2025-27151.patch
 
 BuildRequires:     make
 BuildRequires:     gcc
@@ -106,7 +104,6 @@ BuildArch:         noarch
 
 %prep
 %setup -qn %{name}-%{version}
-%patch -P1 -p1
 
 mv deps/lua/COPYRIGHT             COPYRIGHT-lua
 mv deps/jemalloc/COPYING          COPYING-jemalloc
@@ -268,7 +265,10 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 
 
 %changelog
-* Tue Feb 24 2026 Lukas Javorsky <ljavorsk@redhat.com> - 8.0.7-1
+* Tue May 19 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.0.9-1
+- Rebase to 8.0.9 for CVE-2026-23479 CVE-2026-25243 CVE-2026-23631
+
+* Mon Mar 02 2026 Lukas Javorsky <ljavorsk@redhat.com> - 8.0.7-1
 - Rebase to 8.0.7 for CVE-2026-21863 CVE-2025-67733
 
 * Fri Oct 17 2025 Remi Collet <remi@fedoraproject.org> - 8.0.6-2
