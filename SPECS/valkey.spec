@@ -2,7 +2,7 @@
 %bcond_with tests
 
 Name:              valkey
-Version:           8.0.9
+Version:           8.0.10
 Release:           1%{?dist}
 Summary:           A persistent key-value database
 # valkey: BSD-3-Clause
@@ -265,6 +265,9 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 
 
 %changelog
+* Wed Jul 29 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.0.10-1
+- Rebase to 8.0.10 for CVE-2026-56684 CVE-2026-63639 (CVE-2026-66373 in redis)
+
 * Tue May 19 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.0.9-1
 - Rebase to 8.0.9 for CVE-2026-23479 CVE-2026-25243 CVE-2026-23631
 
