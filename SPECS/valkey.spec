@@ -2,7 +2,7 @@
 %bcond_with tests
 
 Name:              valkey
-Version:           8.0.11
+Version:           8.1.10
 Release:           1%{?dist}
 Summary:           A persistent key-value database
 # valkey: BSD-3-Clause
@@ -18,8 +18,14 @@ Source2:           %{name}-sentinel.service
 Source3:           %{name}.service
 Source4:           %{name}.sysusers
 Source5:           %{name}.tmpfiles
-Source8:           macros.%{name}
 Source9:           migrate_redis_to_valkey.sh
+
+# Fix default paths in configuration files for RPM layout
+Patch2:            %{name}-conf.patch
+# Workaround to https://github.com/valkey-io/valkey/issues/2678
+Patch3:		   %{name}-loadmod.patch
+#Fix linker flags: https://github.com/valkey-io/valkey/pull/3344
+Patch4:		   %{name}-bindnow.patch
 
 BuildRequires:     make
 BuildRequires:     gcc
@@ -30,6 +36,7 @@ BuildRequires:     tcl
 BuildRequires:     pkgconfig(libsystemd)
 BuildRequires:     systemd-devel
 BuildRequires:     systemd-rpm-macros
+BuildRequires:     rdma-core-devel
 BuildRequires:     openssl-devel
 Requires:          logrotate
 # from deps/hiredis/hiredis.h
@@ -48,6 +55,7 @@ Provides:          bundled(fpconv)
 
 %global valkey_modules_abi 1
 %global valkey_modules_dir %{_libdir}/%{name}/modules
+%global valkey_modules_cfg %{_sysconfdir}/%{name}/modules
 Provides:          valkey(modules_abi)%{?_isa} = %{valkey_modules_abi}
 
 ExcludeArch:       %{ix86}
@@ -81,10 +89,20 @@ You can use Valkey from most programming languages also.
 Summary:           Development header for Valkey module development
 # Header-Only Library (https://fedoraproject.org/wiki/Packaging:Guidelines)
 Provides:          %{name}-static = %{version}-%{release}
+Requires:          %{name}%{?_isa} = %{version}-%{release}
 
 %description       devel
 Header file required for building loadable Valkey modules.
 
+%package           rdma
+Summary:           RDMA module for %{name}
+Requires:          %{name}%{?_isa} = %{version}-%{release}
+Supplements:       %{name}
+
+%description       rdma
+%summary.
+
+See https://valkey.io/topics/RDMA/
 
 %package           compat-redis
 Summary:           Conversion script and compatibility symlinks for Redis
@@ -104,6 +122,9 @@ BuildArch:         noarch
 
 %prep
 %setup -qn %{name}-%{version}
+%patch -P2 -p1 -b.rpm
+%patch -P3 -p1 -b .loadmod
+%patch -P4 -p1 -b .bindnow
 
 mv deps/lua/COPYRIGHT             COPYRIGHT-lua
 mv deps/jemalloc/COPYING          COPYING-jemalloc
@@ -125,19 +146,17 @@ sed -e 's/--with-lg-quantum/--with-lg-page=16 --with-lg-quantum/' -i deps/Makefi
 api=`sed -n -e 's/#define VALKEYMODULE_APIVER_[0-9][0-9]* //p' src/valkeymodule.h`
 if test "$api" != "%{valkey_modules_abi}"; then
    : Error: Upstream API version is now ${api}, expecting %%{valkey_modules_abi}.
-   : Update the valkey_modules_abi macro, the rpmmacros file, and rebuild.
+   : Update the valkey_modules_abi macro, and rebuild.
    exit 1
 fi
 
-
-sed -i -e 's|^logfile .*$|logfile /var/log/valkey/valkey.log|g' \
-  -e 's|^# unixsocket .*$|unixsocket /run/valkey/valkey.sock|g' \
-  -e 's|^pidfile .*$|pidfile /run/valkey/valkey.pid|g' \
-  valkey.conf
-
-sed -i -e 's|^logfile .*$|logfile /var/log/valkey/sentinel.log|g' \
-  -e 's|^pidfile .*$|pidfile /run/valkey/sentinel.pid|g' \
-  sentinel.conf
+# Generates macro file
+cat << 'EOF' | tee macros.%{name}
+%%valkey_version     %version
+%%valkey_modules_abi %valkey_modules_abi
+%%valkey_modules_dir %valkey_modules_dir
+%%valkey_modules_cfg %valkey_modules_cfg
+EOF
 
 %if (%{defined fedora} && 0%{?fedora} < 42) || (%{defined rhel} && 0%{?rhel} < 10)
 # these lines are for conditionals around sysconfig to valkey.conf porting scriptlets to avoid re-runs
@@ -145,8 +164,13 @@ echo '# valkey_rpm_conf' >> valkey.conf
 echo '# valkey-sentinel_rpm_conf' >> sentinel.conf
 %endif
 
-%global make_flags DEBUG="" V="echo" PREFIX=%{buildroot}%{_prefix} BUILD_WITH_SYSTEMD=yes BUILD_TLS=yes
+%global make_flags DEBUG="" V="echo" PREFIX=%{buildroot}%{_prefix} BUILD_WITH_SYSTEMD=yes BUILD_TLS=yes BUILD_RDMA=module
 
+: RDMA configuration file
+cat << EOF | tee rdma.conf
+# RDMA module
+loadmodule %{valkey_modules_dir}/rdma.so
+EOF
 
 %build
 %make_build %{make_flags}
@@ -176,6 +200,7 @@ install -pDm644 %{S:1} %{buildroot}%{_sysconfdir}/logrotate.d/%{name}
 # Install configuration files.
 install -pDm640 %{name}.conf  %{buildroot}%{_sysconfdir}/%{name}/%{name}.conf
 install -pDm640 sentinel.conf %{buildroot}%{_sysconfdir}/%{name}/sentinel.conf
+install -dm750  %{buildroot}%{valkey_modules_cfg}
 
 # Install systemd unit files.
 mkdir -p %{buildroot}%{_unitdir}
@@ -190,10 +215,14 @@ install -pDm644 src/%{name}module.h %{buildroot}%{_includedir}/%{name}module.h
 
 # Install rpm macros for valkey modules
 #mkdir -p %{buildroot}%{_rpmmacrodir}
-install -pDm644 %{S:8} %{buildroot}%{_rpmmacrodir}/macros.%{name}
+install -pDm644 macros.%{name} %{buildroot}%{_rpmmacrodir}/macros.%{name}
 
 # compat script
 install -Dpm 755 %{S:9} %{buildroot}%{_libexecdir}/migrate_redis_to_valkey.sh
+
+# RDMA module
+install -pm755 src/valkey-rdma.so %{buildroot}%{valkey_modules_dir}/rdma.so
+install -pm640 rdma.conf          %{buildroot}%{valkey_modules_cfg}/rdma.conf
 
 
 %check
@@ -238,6 +267,7 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 %license COPYING-hiredis-BSD-3-Clause
 %config(noreplace) %{_sysconfdir}/logrotate.d/%{name}
 %attr(0750, valkey, root) %dir %{_sysconfdir}/%{name}
+%attr(0750, valkey, root) %dir %{valkey_modules_cfg}
 %attr(0640, valkey, root) %config(noreplace) %{_sysconfdir}/%{name}/%{name}.conf
 %attr(0640, valkey, root) %config(noreplace) %{_sysconfdir}/%{name}/sentinel.conf
 %dir %{_libdir}/%{name}
@@ -251,6 +281,9 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 %{_sysusersdir}/%{name}.conf
 %{_tmpfilesdir}/%{name}.conf
 
+%files rdma
+%attr(0640, valkey, root) %config(noreplace) %{valkey_modules_cfg}/rdma.conf
+%{valkey_modules_dir}/rdma.so
 
 %files devel
 # main package is not required
@@ -265,11 +298,23 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 
 
 %changelog
-* Wed Sep 02 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.0.11-1
-- Rebase to 8.0.11 for CVE-2026-56684 CVE-2026-63639 (CVE-2026-66373 in redis)
+* Wed Sep 02 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.1.10-1
+- Rebase to 8.1.10 for CVE-2026-56684 CVE-2026-63639 (CVE-2026-66373 in redis)
 
-* Tue May 19 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.0.9-1
-- Rebase to 8.0.9 for CVE-2026-23479 CVE-2026-25243 CVE-2026-23631
+* Tue May 19 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.1.7-1
+- Rebase to 8.1.7 for CVE-2026-23479 CVE-2026-25243 CVE-2026-23631
+
+* Wed Mar 04 2026 Lukas Javorsky <ljavorsk@redhat.com> - 8.1.6-1
+- Rebase to version 8.1
+- fix CONFIG REWRITE breaks configuration
+  reported as https://github.com/valkey-io/valkey/issues/2678
+  using patch from https://github.com/valkey-io/valkey/pull/2689
+- add sub-package for rdma module
+- use patch for configuration changes
+- add /etc/valkey/modules drop-in directory for module configuration files
+- add %%valkey_version and %%valkey_modules_cfg macros
+- fix module linker flags using patch from
+  https://github.com/valkey-io/valkey/pull/3344
 
 * Mon Mar 02 2026 Lukas Javorsky <ljavorsk@redhat.com> - 8.0.7-1
 - Rebase to 8.0.7 for CVE-2026-21863 CVE-2025-67733
