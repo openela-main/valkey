@@ -1,0 +1,87 @@
+From b43f6b9722df90669a1c4e6f4e520f20ae330ac6 Mon Sep 17 00:00:00 2001
+From: Petr Khartskhaev <pkhartsk@redhat.com>
+Date: Thu, 15 Oct 2026 15:12:27 +0200
+Subject: [PATCH 2/3] Fixes to dual certs (#4663)
+
+- update various outdated comments
+- fingerprint alt_key_file in tls info metadata
+- make test assertions more specific to new log messages
+
+Signed-off-by: Petr Khartskhaev <pkhartsk@redhat.com>
+---
+ .config/typos.toml      | 6 +-----
+ src/server.h            | 2 +-
+ utils/gen-test-certs.sh | 2 +-
+ valkey.conf             | 6 +++---
+ 4 files changed, 6 insertions(+), 10 deletions(-)
+
+diff --git a/.config/typos.toml b/.config/typos.toml
+index 678dd65..01f20a8 100644
+--- a/.config/typos.toml
++++ b/.config/typos.toml
+@@ -12,6 +12,7 @@ ignore-hidden = false
+ [default.extend-words]
+ exat = "exat"
+ optin = "optin"
++passin = "passin"
+ smove = "smove"
+ Parth = "Parth" # seems like the spellchecker does not like it is similar to "Path"
+ 
+@@ -36,11 +37,6 @@ extend-ignore-re = [
+     "DUMPed",
+ ]
+ 
+-[type.sh]
+-extend-ignore-re = [
+-    "passin", # gen-test-certs.sh
+-]
+-
+ [type.c.extend-identifiers]
+ advices = "advices"
+ clen = "clen"
+diff --git a/src/server.h b/src/server.h
+index ca735bf..6df951c 100644
+--- a/src/server.h
++++ b/src/server.h
+@@ -1480,7 +1480,7 @@ typedef struct serverTLSContextConfig {
+     char *client_cert_file;     /* Certificate to use as a client; if none, use cert_file */
+     char *client_key_file;      /* Private key filename for client_cert_file */
+     char *client_key_file_pass; /* Optional password for client_key_file */
+-    char *alt_cert_file;        /* Secondary server side cert file name */
++    char *alt_cert_file;        /* Alternate server side cert file name */
+     char *alt_key_file;         /* Private key filename for alt_cert_file */
+     char *alt_key_file_pass;    /* Optional password for alt_key_file */
+     char *dh_params_file;
+diff --git a/utils/gen-test-certs.sh b/utils/gen-test-certs.sh
+index ea6d3bb..2efac31 100755
+--- a/utils/gen-test-certs.sh
++++ b/utils/gen-test-certs.sh
+@@ -4,7 +4,7 @@
+ #
+ #   tests/tls/ca.{crt,key}          Self signed CA certificate.
+ #   tests/tls/valkey{,-pw}.{crt,key}             A certificate with no key usage/policy restrictions. With and without a passphrase.
+-#   tests/tls/valkey-mldsa{,-pw}.{crt,key}       A PQC certificate with no key usage/policy restrictions. With and without a passphrase.
++#   tests/tls/valkey-ec{,-pw}.{crt,key}          An ECDSA certificate with no key usage/policy restrictions. With and without a passphrase.
+ #   tests/tls/client.{crt,key}      A certificate restricted for SSL client usage.
+ #   tests/tls/server.{crt,key}      A certificate restricted for SSL server usage.
+ #   tests/tls/valkey.dh              DH Params file.
+diff --git a/valkey.conf b/valkey.conf
+index edb264a..0ee0f11 100644
+--- a/valkey.conf
++++ b/valkey.conf
+@@ -211,9 +211,9 @@ tcp-keepalive 300
+ # You may also set up a secondary certificate and private key that use a
+ # different encryption algorithm in case a client, primary or cluster peer doesn't
+ # support the algorithm the above defined certificate uses (e.g. a PQC one).
+-# The ordering of the primary and secondary certificate does not matter as
+-# the most secure one will be chosen automatically if supported on both the
+-# client and server.
++# Both certificates are offered to the peer. Which one is used is negotiated
++# from the signature algorithms both sides support, with tls-prefer-server-ciphers
++# deciding whose preference order wins. Configuration order has no effect.
+ #
+ # tls-alt-cert-file valkey_rsa.crt
+ # tls-alt-key-file valkey_rsa.key
+-- 
+2.55.0
+

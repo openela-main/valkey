@@ -3,7 +3,7 @@
 
 Name:              valkey
 Version:           8.1.10
-Release:           1%{?dist}
+Release:           2%{?dist}
 Summary:           A persistent key-value database
 # valkey: BSD-3-Clause
 # hiredis: BSD-3-Clause
@@ -26,6 +26,13 @@ Patch2:            %{name}-conf.patch
 Patch3:		   %{name}-loadmod.patch
 #Fix linker flags: https://github.com/valkey-io/valkey/pull/3344
 Patch4:		   %{name}-bindnow.patch
+# Backport dual certificates support from upstream commits
+# 03a7447bd8da49e6c601ce069136abb9cd943e4f
+Patch5:            0001-backport-dual-certs.patch
+# d265ca949baf5468a38e6508fc074b15733c710e
+Patch6:            0002-backport-dual-certs.patch
+# 3f9062ed54d56ec0e6b0cfb0037cebbd3726acdc
+Patch7:            0003-backport-dual-certs.patch
 
 BuildRequires:     make
 BuildRequires:     gcc
@@ -125,6 +132,9 @@ BuildArch:         noarch
 %patch -P2 -p1 -b.rpm
 %patch -P3 -p1 -b .loadmod
 %patch -P4 -p1 -b .bindnow
+%patch -P5 -p1
+%patch -P6 -p1
+%patch -P7 -p1
 
 mv deps/lua/COPYRIGHT             COPYRIGHT-lua
 mv deps/jemalloc/COPYING          COPYING-jemalloc
@@ -298,6 +308,9 @@ taskset -c 1 ./runtest --clients 50 --skiptest "Active defrag - AOF loading"
 
 
 %changelog
+* Thu Oct 15 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.1.10-2
+- Backport dual certificates functionality and unit tests
+
 * Wed Sep 02 2026 Petr Khartskhaev <pkhartsk@redhat.com> - 8.1.10-1
 - Rebase to 8.1.10 for CVE-2026-56684 CVE-2026-63639 (CVE-2026-66373 in redis)
 

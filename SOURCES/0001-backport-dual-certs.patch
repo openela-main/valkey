@@ -1,0 +1,415 @@
+From 9939789a4bb4e4b9ca02855a1052910a8036b4af Mon Sep 17 00:00:00 2001
+From: Petr Khartskhaev <pkhartsk@redhat.com>
+Date: Thu, 15 Oct 2026 15:07:17 +0200
+Subject: [PATCH 1/3] Add support for secondary certificates (#3717)
+
+New config options to enable using two certificates with different
+algorithm types at once.
+
+    tls-alt-cert-file
+    tls-alt-key-file
+    tls-alt-key-file-pass
+
+E.g. one can be a PQC mldsa certificate and another can be RSA for
+backwards compatibility with older clients that don't support PQC yet.
+
+New INFO fields under the TLS section (matching existing
+`tls_server_cert_serial` and `tls_server_cert_expires_in_seconds`):
+
+    tls_server_alt_cert_serial
+    tls_server_alt_cert_expires_in_seconds
+
+Resolves #3403
+
+---------
+
+Signed-off-by: Petr Khartskhaev <pkhartsk@redhat.com>
+---
+ .config/typos.toml      |   5 ++
+ src/config.c            |   3 +
+ src/server.h            |   3 +
+ src/tls.c               |  55 +++++++++++++++++-
+ tests/unit/tls.tcl      | 123 ++++++++++++++++++++++++++++++++++++++++
+ utils/gen-test-certs.sh |  25 +++++---
+ valkey.conf             |  13 ++++-
+ 7 files changed, 218 insertions(+), 9 deletions(-)
+
+diff --git a/.config/typos.toml b/.config/typos.toml
+index 4a7f7de..678dd65 100644
+--- a/.config/typos.toml
++++ b/.config/typos.toml
+@@ -36,6 +36,11 @@ extend-ignore-re = [
+     "DUMPed",
+ ]
+ 
++[type.sh]
++extend-ignore-re = [
++    "passin", # gen-test-certs.sh
++]
++
+ [type.c.extend-identifiers]
+ advices = "advices"
+ clen = "clen"
+diff --git a/src/config.c b/src/config.c
+index d61df8f..30c4264 100644
+--- a/src/config.c
++++ b/src/config.c
+@@ -3388,6 +3388,9 @@ standardConfig static_configs[] = {
+     createStringConfig("tls-client-cert-file", NULL, VOLATILE_CONFIG | MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.client_cert_file, NULL, NULL, applyTlsCfg),
+     createStringConfig("tls-client-key-file", NULL, VOLATILE_CONFIG | MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.client_key_file, NULL, NULL, applyTlsCfg),
+     createStringConfig("tls-client-key-file-pass", NULL, MODIFIABLE_CONFIG | SENSITIVE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.client_key_file_pass, NULL, NULL, applyTlsCfg),
++    createStringConfig("tls-alt-cert-file", NULL, VOLATILE_CONFIG | MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.alt_cert_file, NULL, NULL, applyTlsCfg),
++    createStringConfig("tls-alt-key-file", NULL, VOLATILE_CONFIG | MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.alt_key_file, NULL, NULL, applyTlsCfg),
++    createStringConfig("tls-alt-key-file-pass", NULL, MODIFIABLE_CONFIG | SENSITIVE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.alt_key_file_pass, NULL, NULL, applyTlsCfg),
+     createStringConfig("tls-dh-params-file", NULL, VOLATILE_CONFIG | MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.dh_params_file, NULL, NULL, applyTlsCfg),
+     createStringConfig("tls-ca-cert-file", NULL, VOLATILE_CONFIG | MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.ca_cert_file, NULL, NULL, applyTlsCfg),
+     createStringConfig("tls-ca-cert-dir", NULL, VOLATILE_CONFIG | MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.tls_ctx_config.ca_cert_dir, NULL, NULL, applyTlsCfg),
+diff --git a/src/server.h b/src/server.h
+index 284bf4e..ca735bf 100644
+--- a/src/server.h
++++ b/src/server.h
+@@ -1480,6 +1480,9 @@ typedef struct serverTLSContextConfig {
+     char *client_cert_file;     /* Certificate to use as a client; if none, use cert_file */
+     char *client_key_file;      /* Private key filename for client_cert_file */
+     char *client_key_file_pass; /* Optional password for client_key_file */
++    char *alt_cert_file;        /* Secondary server side cert file name */
++    char *alt_key_file;         /* Private key filename for alt_cert_file */
++    char *alt_key_file_pass;    /* Optional password for alt_key_file */
+     char *dh_params_file;
+     char *ca_cert_file;
+     char *ca_cert_dir;
+diff --git a/src/tls.c b/src/tls.c
+index a675f84..6555edc 100644
+--- a/src/tls.c
++++ b/src/tls.c
+@@ -36,6 +36,7 @@
+ 
+ #if (USE_OPENSSL == 1 /* BUILD_YES */) || ((USE_OPENSSL == 2 /* BUILD_MODULE */) && (BUILD_TLS_MODULE == 2))
+ 
++#include <openssl/x509_vfy.h>
+ #include <openssl/conf.h>
+ #include <openssl/ssl.h>
+ #include <openssl/err.h>
+@@ -211,9 +212,14 @@ static SSL_CTX *createSSLContext(serverTLSContextConfig *ctx_config, int protoco
+     const char *cert_file = client ? ctx_config->client_cert_file : ctx_config->cert_file;
+     const char *key_file = client ? ctx_config->client_key_file : ctx_config->key_file;
+     const char *key_file_pass = client ? ctx_config->client_key_file_pass : ctx_config->key_file_pass;
++
++    const char *alt_cert_file = client ? NULL : ctx_config->alt_cert_file;
++    const char *alt_key_file = client ? NULL : ctx_config->alt_key_file;
++    const char *alt_key_file_pass = client ? NULL : ctx_config->alt_key_file_pass;
+     char errbuf[256];
+     SSL_CTX *ctx = NULL;
+-
++    EVP_PKEY *primary_pkey = NULL;
++    EVP_PKEY *alt_pkey = NULL;
+     ctx = SSL_CTX_new(SSLv23_method());
+     if (!ctx) goto error;
+ 
+@@ -248,11 +254,44 @@ static SSL_CTX *createSSLContext(serverTLSContextConfig *ctx_config, int protoco
+         goto error;
+     }
+ 
++    if (alt_cert_file) {
++        primary_pkey = X509_get_pubkey(SSL_CTX_get0_certificate(ctx));
++        if (!primary_pkey) {
++            serverLog(LL_WARNING, "Could not get public key from primary certificate");
++            goto error;
++        }
++
++        if (SSL_CTX_use_certificate_chain_file(ctx, alt_cert_file) <= 0) {
++            ERR_error_string_n(ERR_get_error(), errbuf, sizeof(errbuf));
++            serverLog(LL_WARNING, "Failed to load certificate: %s: %s", alt_cert_file, errbuf);
++            goto error;
++        }
++
++        alt_pkey = X509_get_pubkey(SSL_CTX_get0_certificate(ctx));
++        if (!alt_pkey) {
++            serverLog(LL_WARNING, "Could not get public key from alternate certificate");
++            goto error;
++        }
++
++        if (EVP_PKEY_base_id(primary_pkey) == EVP_PKEY_base_id(alt_pkey)) {
++            serverLog(LL_WARNING, "Primary and alternate certificates must use different key algorithms");
++            goto error;
++        }
++    }
++
+     if (SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) <= 0) {
+         ERR_error_string_n(ERR_get_error(), errbuf, sizeof(errbuf));
+         serverLog(LL_WARNING, "Failed to load private key: %s: %s", key_file, errbuf);
+         goto error;
+     }
++    if (alt_key_file) {
++        SSL_CTX_set_default_passwd_cb_userdata(ctx, (void *)alt_key_file_pass);
++        if (SSL_CTX_use_PrivateKey_file(ctx, alt_key_file, SSL_FILETYPE_PEM) <= 0) {
++            ERR_error_string_n(ERR_get_error(), errbuf, sizeof(errbuf));
++            serverLog(LL_WARNING, "Failed to load private key: %s: %s", alt_key_file, errbuf);
++            goto error;
++        }
++    }
+ 
+     if ((ctx_config->ca_cert_file || ctx_config->ca_cert_dir) &&
+         SSL_CTX_load_verify_locations(ctx, ctx_config->ca_cert_file, ctx_config->ca_cert_dir) <= 0) {
+@@ -273,9 +312,13 @@ static SSL_CTX *createSSLContext(serverTLSContextConfig *ctx_config, int protoco
+     }
+ #endif
+ 
++    EVP_PKEY_free(primary_pkey);
++    EVP_PKEY_free(alt_pkey);
+     return ctx;
+ 
+ error:
++    EVP_PKEY_free(primary_pkey);
++    EVP_PKEY_free(alt_pkey);
+     if (ctx) SSL_CTX_free(ctx);
+     return NULL;
+ }
+@@ -306,6 +349,16 @@ static int tlsConfigure(void *priv, int reconfigure) {
+         goto error;
+     }
+ 
++    if (ctx_config->alt_cert_file && !ctx_config->alt_key_file) {
++        serverLog(LL_WARNING, "tls-alt-cert-file provided without a key");
++        goto error;
++    }
++
++    if (ctx_config->alt_key_file && !ctx_config->alt_cert_file) {
++        serverLog(LL_WARNING, "tls-alt-key-file provided without a certificate");
++        goto error;
++    }
++
+     if (((server.tls_auth_clients != TLS_CLIENT_AUTH_NO) || server.tls_cluster || server.tls_replication) &&
+         !ctx_config->ca_cert_file && !ctx_config->ca_cert_dir) {
+         serverLog(LL_WARNING, "Either tls-ca-cert-file or tls-ca-cert-dir must be specified when tls-cluster, "
+diff --git a/tests/unit/tls.tcl b/tests/unit/tls.tcl
+index 99e04ec..065a970 100644
+--- a/tests/unit/tls.tcl
++++ b/tests/unit/tls.tcl
+@@ -127,6 +127,129 @@ start_server {tags {"tls"}} {
+             }
+         }
+ 
++        test {TLS: basic dual certificates support} {
++            # backup current certificates
++            set orig_server_crt [lindex [r config get tls-cert-file] 1]
++            set orig_server_key [lindex [r config get tls-key-file] 1]
++            set orig_server_alt_crt [lindex [r config get tls-alt-cert-file] 1]
++            set orig_server_alt_key [lindex [r config get tls-alt-key-file] 1]
++            set ca_file [lindex [r config get tls-ca-cert-file] 1]
++
++            set valkey_crt [format "%s/tests/tls/valkey.crt" [pwd]]
++            set valkey_key [format "%s/tests/tls/valkey.key" [pwd]]
++            set valkey_ec_crt [format "%s/tests/tls/valkey-ec.crt" [pwd]]
++            set valkey_ec_key [format "%s/tests/tls/valkey-ec.key" [pwd]]
++            try {
++                r CONFIG SET tls-cert-file $valkey_ec_crt tls-key-file $valkey_ec_key tls-alt-cert-file $valkey_crt tls-alt-key-file $valkey_key
++                set s [valkey_client]
++                assert_equal "PONG" [$s PING]
++                $s close
++                # also test connecting with openssl without ec ciphers support
++                set port [lindex [r config get tls-port] 1]
++                catch {exec openssl s_client -connect localhost:$port -CAfile $valkey_crt -sigalgs "rsa_pss_pss_sha256:rsa_pss_rsae_sha256" < /dev/null} out
++                assert_match {*Peer signature type: [rR][sS][aA][-_][pP][sS][sS]*} $out
++            } finally {
++                #cleanup
++                r CONFIG SET tls-cert-file $orig_server_crt tls-key-file $orig_server_key tls-alt-cert-file $orig_server_alt_crt tls-alt-key-file $orig_server_alt_key
++            }
++        }
++
++        test {TLS: alt cert and key files must be provided together} {
++            # backup current certificates
++            set orig_server_crt [lindex [r config get tls-cert-file] 1]
++            set orig_server_key [lindex [r config get tls-key-file] 1]
++            set orig_server_alt_crt [lindex [r config get tls-alt-cert-file] 1]
++            set orig_server_alt_key [lindex [r config get tls-alt-key-file] 1]
++
++            try {
++                r CONFIG SET tls-cert-file $orig_server_crt tls-key-file $orig_server_key tls-alt-cert-file "" tls-alt-key-file ""
++
++                catch {r CONFIG SET tls-alt-cert-file $orig_server_crt} e
++                assert_match {*related to argument 'tls-alt-cert-file'*} $e
++                catch {r CONFIG SET tls-alt-key-file $orig_server_key} e
++                assert_match {*related to argument 'tls-alt-key-file'*} $e
++            } finally {
++                #cleanup
++                r CONFIG SET tls-cert-file $orig_server_crt tls-key-file $orig_server_key tls-alt-cert-file $orig_server_alt_crt tls-alt-key-file $orig_server_alt_key
++            }
++        }
++
++        test {TLS: the same certificate twice not allowed} {
++            # backup current certificates
++            set orig_server_crt [lindex [r config get tls-cert-file] 1]
++            set orig_server_key [lindex [r config get tls-key-file] 1]
++            set orig_server_alt_crt [lindex [r config get tls-alt-cert-file] 1]
++            set orig_server_alt_key [lindex [r config get tls-alt-key-file] 1]
++
++            try {
++                catch {r CONFIG SET tls-alt-cert-file $orig_server_crt tls-alt-key-file $orig_server_key} e
++                assert_match {*Unable to update TLS configuration*} $e
++            } finally {
++                #cleanup
++                r CONFIG SET tls-cert-file $orig_server_crt tls-key-file $orig_server_key tls-alt-cert-file $orig_server_alt_crt tls-alt-key-file $orig_server_alt_key
++            }
++        }
++
++        test {TLS: Two certificates of the same type not allowed} {
++            # backup current certificates
++            set orig_server_crt [lindex [r config get tls-cert-file] 1]
++            set orig_server_key [lindex [r config get tls-key-file] 1]
++            set orig_server_alt_crt [lindex [r config get tls-alt-cert-file] 1]
++            set orig_server_alt_key [lindex [r config get tls-alt-key-file] 1]
++
++            set valkey_crt [format "%s/tests/tls/valkey.crt" [pwd]]
++            set valkey_key [format "%s/tests/tls/valkey.key" [pwd]]
++            set valkey_ec_crt [format "%s/tests/tls/valkey-ec.crt" [pwd]]
++            set valkey_ec_key [format "%s/tests/tls/valkey-ec.key" [pwd]]
++            set valkey_pw_crt [format "%s/tests/tls/valkey-pw.crt" [pwd]]
++            set valkey_pw_key [format "%s/tests/tls/valkey-pw.key" [pwd]]
++            set valkey_ec_pw_crt [format "%s/tests/tls/valkey-ec-pw.crt" [pwd]]
++            set valkey_ec_pw_key [format "%s/tests/tls/valkey-ec-pw.key" [pwd]]
++
++            try {
++                r CONFIG SET tls-cert-file $valkey_ec_crt tls-key-file $valkey_ec_key tls-alt-cert-file $valkey_crt tls-alt-key-file $valkey_key
++                set s [valkey_client]
++                assert_equal "PONG" [$s PING]
++                $s close
++                catch {r CONFIG SET tls-alt-cert-file $valkey_ec_pw_crt tls-alt-key-file $valkey_ec_pw_key tls-key-file-pass 1234} e
++                assert_match {*Unable to update TLS configuration*} $e
++                catch {r CONFIG SET tls-cert-file $valkey_pw_crt tls-key-file $valkey_pw_key tls-key-file-pass 1234} e
++                assert_match {*Unable to update TLS configuration*} $e
++            } finally {
++                #cleanup
++                r CONFIG SET tls-cert-file $orig_server_crt tls-key-file $orig_server_key tls-alt-cert-file $orig_server_alt_crt tls-alt-key-file $orig_server_alt_key tls-key-file-pass ""
++            }
++        }
++
++        test {TLS: Dual certificates with passphrases} {
++            # backup current certificates
++            set orig_server_crt [lindex [r config get tls-cert-file] 1]
++            set orig_server_key [lindex [r config get tls-key-file] 1]
++            set orig_server_alt_crt [lindex [r config get tls-alt-cert-file] 1]
++            set orig_server_alt_key [lindex [r config get tls-alt-key-file] 1]
++
++            set valkey_crt [format "%s/tests/tls/valkey.crt" [pwd]]
++            set valkey_key [format "%s/tests/tls/valkey.key" [pwd]]
++            set valkey_ec_crt [format "%s/tests/tls/valkey-ec.crt" [pwd]]
++            set valkey_ec_key [format "%s/tests/tls/valkey-ec.key" [pwd]]
++            set valkey_pw_crt [format "%s/tests/tls/valkey-pw.crt" [pwd]]
++            set valkey_pw_key [format "%s/tests/tls/valkey-pw.key" [pwd]]
++            set valkey_ec_pw_crt [format "%s/tests/tls/valkey-ec-pw.crt" [pwd]]
++            set valkey_ec_pw_key [format "%s/tests/tls/valkey-ec-pw.key" [pwd]]
++
++            try {
++                r CONFIG SET tls-cert-file $valkey_ec_pw_crt tls-key-file $valkey_ec_pw_key tls-alt-cert-file $valkey_crt tls-alt-key-file $valkey_key tls-key-file-pass asdf tls-alt-key-file-pass 1234
++                set s [valkey_client]
++                assert_equal "PONG" [$s PING]
++                $s close
++                r CONFIG SET tls-cert-file $valkey_ec_pw_crt tls-key-file $valkey_ec_pw_key tls-alt-cert-file $valkey_pw_crt tls-alt-key-file $valkey_pw_key
++                r CONFIG SET tls-cert-file $valkey_ec_crt tls-key-file $valkey_ec_key tls-alt-cert-file $valkey_pw_crt tls-alt-key-file $valkey_pw_key
++            } finally {
++                #cleanup
++                r CONFIG SET tls-cert-file $orig_server_crt tls-key-file $orig_server_key tls-alt-cert-file $orig_server_alt_crt tls-alt-key-file $orig_server_alt_key tls-key-file-pass "" tls-alt-key-file-pass ""
++            }
++        }
++
+         test {TLS: switch between tcp and tls ports} {
+             set srv_port [srv 0 port]
+ 
+diff --git a/utils/gen-test-certs.sh b/utils/gen-test-certs.sh
+index d692bac..ea6d3bb 100755
+--- a/utils/gen-test-certs.sh
++++ b/utils/gen-test-certs.sh
+@@ -3,7 +3,8 @@
+ # Generate some test certificates which are used by the regression test suite:
+ #
+ #   tests/tls/ca.{crt,key}          Self signed CA certificate.
+-#   tests/tls/valkey.{crt,key}       A certificate with no key usage/policy restrictions.
++#   tests/tls/valkey{,-pw}.{crt,key}             A certificate with no key usage/policy restrictions. With and without a passphrase.
++#   tests/tls/valkey-mldsa{,-pw}.{crt,key}       A PQC certificate with no key usage/policy restrictions. With and without a passphrase.
+ #   tests/tls/client.{crt,key}      A certificate restricted for SSL client usage.
+ #   tests/tls/server.{crt,key}      A certificate restricted for SSL server usage.
+ #   tests/tls/valkey.dh              DH Params file.
+@@ -11,7 +12,8 @@
+ generate_cert() {
+     local name=$1
+     local cn="$2"
+-    local opts="$3"
++    local reqopts="$3"
++    local opts="$4"
+ 
+     local keyfile=tests/tls/${name}.key
+     local certfile=tests/tls/${name}.crt
+@@ -20,7 +22,8 @@ generate_cert() {
+     openssl req \
+         -new -sha256 \
+         -subj "/O=Valkey Test/CN=$cn" \
+-        -key $keyfile | \
++        -key "$keyfile" \
++        $reqopts | \
+         openssl x509 \
+             -req -sha256 \
+             -CA tests/tls/ca.crt \
+@@ -29,7 +32,7 @@ generate_cert() {
+             -CAcreateserial \
+             -days 365 \
+             $opts \
+-            -out $certfile
++            -out "$certfile"
+ }
+ 
+ mkdir -p tests/tls
+@@ -55,8 +58,16 @@ nsCertType = client
+ subjectAltName = IP:127.0.0.1, IP:::1, DNS:localhost
+ _END_
+ 
+-generate_cert server "Server-only" "-extfile tests/tls/openssl.cnf -extensions server_cert"
+-generate_cert client "Client-only" "-extfile tests/tls/openssl.cnf -extensions client_cert"
+-generate_cert valkey "Generic-cert" "-extfile tests/tls/openssl.cnf -extensions generic_cert"
++generate_cert server "Server-only" "" "-extfile tests/tls/openssl.cnf -extensions server_cert"
++generate_cert client "Client-only" "" "-extfile tests/tls/openssl.cnf -extensions client_cert"
++generate_cert valkey "Generic-cert" "" "-extfile tests/tls/openssl.cnf -extensions generic_cert"
++
++openssl genrsa -passout pass:1234 -aes256 -out tests/tls/valkey-pw.key 2048
++openssl ecparam -name prime256v1 -genkey -noout -out tests/tls/valkey-ec.key
++openssl ecparam -name prime256v1 -genkey | openssl ec -passout pass:asdf -aes256 -out tests/tls/valkey-ec-pw.key
++
++generate_cert valkey-pw "Generic-cert-passworded" "-passin pass:1234" "-extfile tests/tls/openssl.cnf -extensions generic_cert"
++generate_cert valkey-ec "EC-cert" "" "-extfile tests/tls/openssl.cnf -extensions generic_cert"
++generate_cert valkey-ec-pw "EC-cert-passworded" "-passin pass:asdf" "-extfile tests/tls/openssl.cnf -extensions generic_cert"
+ 
+ [ -f tests/tls/valkey.dh ] || openssl dhparam -out tests/tls/valkey.dh 2048
+diff --git a/valkey.conf b/valkey.conf
+index 4b9fd66..edb264a 100644
+--- a/valkey.conf
++++ b/valkey.conf
+@@ -197,7 +197,7 @@ tcp-keepalive 300
+ # tls-port 6379
+ 
+ # Configure a X.509 certificate and private key to use for authenticating the
+-# server to connected clients, primaries or cluster peers.  These files should be
++# server to connected clients, primaries or cluster peers. These files should be
+ # PEM formatted.
+ #
+ # tls-cert-file valkey.crt
+@@ -207,6 +207,17 @@ tcp-keepalive 300
+ # as well.
+ #
+ # tls-key-file-pass secret
++#
++# You may also set up a secondary certificate and private key that use a
++# different encryption algorithm in case a client, primary or cluster peer doesn't
++# support the algorithm the above defined certificate uses (e.g. a PQC one).
++# The ordering of the primary and secondary certificate does not matter as
++# the most secure one will be chosen automatically if supported on both the
++# client and server.
++#
++# tls-alt-cert-file valkey_rsa.crt
++# tls-alt-key-file valkey_rsa.key
++# tls-alt-key-file-pass secret
+ 
+ # Normally the server uses the same certificate for both server functions (accepting
+ # connections) and client functions (replicating from a primary, establishing
+-- 
+2.55.0
+
